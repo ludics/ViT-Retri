@@ -11,6 +11,7 @@ from os.path import join as pjoin
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
@@ -21,6 +22,7 @@ import models.configs as configs
 
 from .modeling_resnet import ResNetV2
 
+from .contrastive_loss import ContrastiveLoss
 
 logger = logging.getLogger(__name__)
 
@@ -267,18 +269,31 @@ class VisionTransformer(nn.Module):
         self.classifier = config.classifier
 
         self.transformer = Transformer(config, img_size, vis)
-        self.head = Linear(config.hidden_size, num_classes)
+        # self.head = Linear(config.hidden_size, num_classes)
 
     def forward(self, x, labels=None):
         x, attn_weights = self.transformer(x)
-        logits = self.head(x[:, 0])
-
+        # logits = self.head(x[:, 0])
+        feats = x[:, 0]
+        feats = F.normalize(feats, p=2, dim=1) 
         if labels is not None:
-            loss_fct = CrossEntropyLoss()
-            loss = loss_fct(logits.view(-1, self.num_classes), labels.view(-1))
+            #loss_fct = CrossEntropyLoss()
+            loss_contr = ContrastiveLoss()
+            '''
+            flag = True
+            if flag:
+                z_i = x[:, 0]
+                print("z_i shape: ", z_i.shape)
+                z_i_norm = torch.norm(z_i, dim=1)
+                print(z_i_norm)
+                print("logits shape: ", logits.shape)
+                print("labels shape: ", labels.shape)
+                flag = False
+            '''
+            loss = loss_contr(feats, labels, feats, labels)
             return loss
         else:
-            return logits, attn_weights
+            return feats, attn_weights
 
     def load_from(self, weights):
         with torch.no_grad():

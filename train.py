@@ -58,11 +58,27 @@ def save_model(args, model):
 def setup(args):
     # Prepare model
     config = CONFIGS[args.model_type]
-
-    num_classes = 10 if args.dataset == "cifar10" else 100
+    
+    if args.dataset == "CUB_200_2011":
+        num_classes = 200
+    elif args.dataset == "car":
+        num_classes = 196
+    elif args.dataset == "nabirds":
+        num_classes = 555
+    elif args.dataset == "dog":
+        num_classes = 120
+    elif args.dataset == "INat2017":
+        num_classes = 5089
+    elif args.dataset == "cifar10":
+        num_classes = 10 
+    else:
+        num_classes = 100
 
     model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes)
     model.load_from(np.load(args.pretrained_dir))
+    if args.pretrained_model is not None:
+        pretrained_model = torch.load(args.pretrained_model)['model']
+        model.load_state_dict(pretrained_model)
     model.to(args.device)
     num_params = count_parameters(model)
 
@@ -244,14 +260,19 @@ def main():
     # Required parameters
     parser.add_argument("--name", required=True,
                         help="Name of this run. Used for monitoring.")
-    parser.add_argument("--dataset", choices=["cifar10", "cifar100"], default="cifar10",
+    parser.add_argument("--dataset", choices=["CUB_200_2011", "car", "dog", "nabirds",
+                                              "INat2017", "cifar10", "cifar100"],
+                        default="CUB_200_2011",
                         help="Which downstream task.")
+    parser.add_argument('--data_root', type=str, default='/opt/tiger/minist')
     parser.add_argument("--model_type", choices=["ViT-B_16", "ViT-B_32", "ViT-L_16",
                                                  "ViT-L_32", "ViT-H_14", "R50-ViT-B_16"],
                         default="ViT-B_16",
                         help="Which variant to use.")
     parser.add_argument("--pretrained_dir", type=str, default="checkpoint/ViT-B_16.npz",
                         help="Where to search for pretrained ViT models.")
+    parser.add_argument("--pretrained_model", type=str, default=None,
+                        help="load pretrained model")
     parser.add_argument("--output_dir", default="output", type=str,
                         help="The output directory where checkpoints will be written.")
 
@@ -280,6 +301,8 @@ def main():
 
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="local_rank for distributed training on gpus")
+    parser.add_argument("--master_port", type=str, default="23456",
+                        help="master_port for distributed training on gpus")
     parser.add_argument('--seed', type=int, default=42,
                         help="random seed for initialization")
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
@@ -293,17 +316,24 @@ def main():
                         help="Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
                              "0 (default value): dynamic loss scaling.\n"
                              "Positive power of 2: static loss scaling value.\n")
+    
+    parser.add_argument('--xbm', action='store_true',
+                        help="Whether to use XBM")
+    
+
     args = parser.parse_args()
 
     # Setup CUDA, GPU & distributed training
+    os.environ["MASTER_PORT"] = args.master_port
+    args.data_root = '{}/{}'.format(args.data_root, args.dataset)
     if args.local_rank == -1:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         args.n_gpu = torch.cuda.device_count()
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
-        torch.distributed.init_process_group(backend='nccl',
-                                             timeout=timedelta(minutes=60))
+        torch.distributed.init_process_group(backend='nccl')
+                                             #timeout=timedelta(minutes=60))
         args.n_gpu = 1
     args.device = device
 

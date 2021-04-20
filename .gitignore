@@ -144,3 +144,8 @@ cython_debug/
 !/logs/
 !/output/
 .idea
+
+# 
+logs/
+output/
+*.swp
