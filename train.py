@@ -6,6 +6,7 @@ import argparse
 import os
 import random
 import numpy as np
+import time
 
 from datetime import timedelta
 
@@ -22,6 +23,14 @@ from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
 from utils.data_utils import get_loader
 from utils.dist_util import get_world_size
 
+from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
+from models.contrastive_loss import ContrastiveLoss
+from models.xbm import XBM
+from utils.feat_extractor import feat_extractor
+from evaluations.eval import AccuracyCalculator
+from evaluations.ret_metric import RetMetric
+from utils.log_info import log_info
+from utils.logger import setup_logger
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +57,12 @@ def simple_accuracy(preds, labels):
     return (preds == labels).mean()
 
 
-def save_model(args, model):
+def save_model(args, model, step=-1, best=False):
     model_to_save = model.module if hasattr(model, 'module') else model
-    model_checkpoint = os.path.join(args.output_dir, "%s_checkpoint.bin" % args.name)
+    if best:
+        model_checkpoint = os.path.join(args.output_dir, f"{args.name}_best.ckpt")
+    else:
+        model_checkpoint = os.path.join(args.output_dir, f"{args.name}_step{step}.ckpt")
     torch.save(model_to_save.state_dict(), model_checkpoint)
     logger.info("Saved model checkpoint to [DIR: %s]", args.output_dir)
 
@@ -58,7 +70,8 @@ def save_model(args, model):
 def setup(args):
     # Prepare model
     config = CONFIGS[args.model_type]
-    
+    args.hidden_size = config.hidden_size
+
     if args.dataset == "CUB_200_2011":
         num_classes = 200
     elif args.dataset == "car":
@@ -101,57 +114,49 @@ def set_seed(args):
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
+def flush_log(writer, iteration):
+    for k, v in log_info.items():
+        if isinstance(v, np.ndarray):
+            writer.add_histogram(k, v, iteration)
+        else:
+            writer.add_scalar(k, v, iteration)
+    for k in list(log_info.keys()):
+        del log_info[k]
+
+best_mapr = 0
+best_iter = -1
 
 def valid(args, model, writer, test_loader, global_step):
     # Validation!
-    eval_losses = AverageMeter()
-
+    global best_mapr
+    logger.info("\n")
     logger.info("***** Running Validation *****")
-    logger.info("  Num steps = %d", len(test_loader))
-    logger.info("  Batch size = %d", args.eval_batch_size)
+    logger.info(f"  Num steps = {len(test_loader)}, Batch size = {args.eval_batch_size}")
 
     model.eval()
-    all_preds, all_label = [], []
-    epoch_iterator = tqdm(test_loader,
-                          desc="Validating... (loss=X.X)",
-                          bar_format="{l_bar}{r_bar}",
-                          dynamic_ncols=True,
-                          disable=args.local_rank not in [-1, 0])
-    loss_fct = torch.nn.CrossEntropyLoss()
-    for step, batch in enumerate(epoch_iterator):
-        batch = tuple(t.to(args.device) for t in batch)
-        x, y = batch
-        with torch.no_grad():
-            logits = model(x)[0]
-
-            eval_loss = loss_fct(logits, y)
-            eval_losses.update(eval_loss.item())
-
-            preds = torch.argmax(logits, dim=-1)
-
-        if len(all_preds) == 0:
-            all_preds.append(preds.detach().cpu().numpy())
-            all_label.append(y.detach().cpu().numpy())
-        else:
-            all_preds[0] = np.append(
-                all_preds[0], preds.detach().cpu().numpy(), axis=0
-            )
-            all_label[0] = np.append(
-                all_label[0], y.detach().cpu().numpy(), axis=0
-            )
-        epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
-
-    all_preds, all_label = all_preds[0], all_label[0]
-    accuracy = simple_accuracy(all_preds, all_label)
-
-    logger.info("\n")
-    logger.info("Validation Results")
-    logger.info("Global Steps: %d" % global_step)
-    logger.info("Valid Loss: %2.5f" % eval_losses.avg)
-    logger.info("Valid Accuracy: %2.5f" % accuracy)
-
-    writer.add_scalar("test/accuracy", scalar_value=accuracy, global_step=global_step)
-    return accuracy
+    labels = test_loader.dataset.test_label
+    labels = np.array([int(k) for k in labels])
+    feats = feat_extractor(model, test_loader, logger)
+    ret_metric = AccuracyCalculator(include=("precision_at_1", "mean_average_precision_at_r",
+                                             "r_precision"), exclude=())
+    ret_metric = ret_metric.get_accuracy(feats, feats, labels, labels, True)
+    mapr_curr = ret_metric["mean_average_precision_at_r"]
+    for k, v in ret_metric.items():
+        log_info[f"e_{k}"] = v
+    r_k = RetMetric(feats, labels)
+    r_k_dict = {}
+    for k in [1, 2, 4, 8]:
+        log_info[f"R@{k}"] = r_k.recall_k(k)
+        r_k_dict[f"R@{k}"] = log_info[f"R@{k}"]
+    if mapr_curr > best_mapr:
+        best_mapr = mapr_curr
+        best_iter = global_step
+        logger.info(f"Best iteration {global_step}: {ret_metric}")
+    else:
+        logger.info(f"Performance at iteration {global_step:06d}: {ret_metric}")
+    logger.info(f"R@k : {r_k_dict}")
+    flush_log(writer, global_step)
+    return mapr_curr
 
 
 def train(args, model):
@@ -194,11 +199,21 @@ def train(args, model):
                 args.train_batch_size * args.gradient_accumulation_steps * (
                     torch.distributed.get_world_size() if args.local_rank != -1 else 1))
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+    
+    criterion = ContrastiveLoss()
+    if args.use_xbm:
+        logger.info(">>> use XBM")
+        xbm = XBM(len(train_loader.dataset), args.hidden_size)
 
     model.zero_grad()
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
     losses = AverageMeter()
     global_step, best_acc = 0, 0
+    if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
+        mapr_curr = valid(args, model, writer, test_loader, global_step)
+        if best_acc < mapr_curr:
+            save_model(args, model, best=True)
+            best_acc = mapr_curr
     while True:
         model.train()
         epoch_iterator = tqdm(train_loader,
@@ -209,7 +224,19 @@ def train(args, model):
         for step, batch in enumerate(epoch_iterator):
             batch = tuple(t.to(args.device) for t in batch)
             x, y = batch
-            loss = model(x, y)
+            feats, _ = model(x)
+            
+            if args.use_xbm and global_step > args.xbm_start_step:
+                xbm.enqueue_dequeue(feats.detach(), y.detach())
+
+            loss = criterion(feats, y, feats, y)
+            log_info["batch_loss"] = loss.item()
+
+            if args.use_xbm and global_step > args.xbm_start_step:
+                xbm_feats, xbm_targets = xbm.get()
+                xbm_loss = criterion(feats, y, xbm_feats, xbm_targets)
+                log_info["xbm_loss"] = xbm_loss.item()
+                loss = loss + xbm_loss
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -231,16 +258,19 @@ def train(args, model):
                 global_step += 1
 
                 epoch_iterator.set_description(
-                    "Training (%d / %d Steps) (loss=%2.5f)" % (global_step, t_total, losses.val)
+                    "Training (%d / %d Steps) (loss=%2.5f) (lr=%.6f)" % (global_step, t_total, losses.val, scheduler.get_lr()[0])
                 )
+                log_info["loss"] = loss.item()
+                log_info["lr"] = scheduler.get_lr()[0]
                 if args.local_rank in [-1, 0]:
-                    writer.add_scalar("train/loss", scalar_value=losses.val, global_step=global_step)
-                    writer.add_scalar("train/lr", scalar_value=scheduler.get_lr()[0], global_step=global_step)
+                    flush_log(writer, global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-                    accuracy = valid(args, model, writer, test_loader, global_step)
-                    if best_acc < accuracy:
-                        save_model(args, model)
-                        best_acc = accuracy
+                    mapr_curr = valid(args, model, writer, test_loader, global_step)
+                    if best_acc < mapr_curr:
+                        save_model(args, model, best=True)
+                        best_acc = mapr_curr
+                    if global_step % args.save_iter == 0:
+                        save_model(args, model, step=global_step)
                     model.train()
 
                 if global_step % t_total == 0:
@@ -251,7 +281,7 @@ def train(args, model):
 
     if args.local_rank in [-1, 0]:
         writer.close()
-    logger.info("Best Accuracy: \t%f" % best_acc)
+    logger.info("Best MAPR: \t%f" % best_acc)
     logger.info("End Training!")
 
 
@@ -275,6 +305,8 @@ def main():
                         help="load pretrained model")
     parser.add_argument("--output_dir", default="output", type=str,
                         help="The output directory where checkpoints will be written.")
+    parser.add_argument("--save_iter", default=1000, type=int,
+                        help="Resolution size")
 
     parser.add_argument("--img_size", default=224, type=int,
                         help="Resolution size")
@@ -317,8 +349,12 @@ def main():
                              "0 (default value): dynamic loss scaling.\n"
                              "Positive power of 2: static loss scaling value.\n")
     
-    parser.add_argument('--xbm', action='store_true',
+    parser.add_argument('--use_xbm', action='store_true',
                         help="Whether to use XBM")
+    parser.add_argument('--xbm_size', type=int, default=5000,
+                        help="XBM queue size")
+    parser.add_argument('--xbm_start_step', type=int, default=1000,
+                        help="XBM queue size")
     
 
     args = parser.parse_args()
@@ -336,9 +372,13 @@ def main():
                                              #timeout=timedelta(minutes=60))
         args.n_gpu = 1
     args.device = device
-
+    args.output_dir = os.path.join(args.output_dir, args.name)
     # Setup logging
+    log_path = os.path.join("logs", args.name)
+    os.makedirs(log_path, exist_ok=True)
+    log_file_name = os.path.join(log_path, time.strftime("%m-%d-%H:%M", time.localtime()) + '.log')
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+                        #filename=log_file_name, filemode='w',
                         datefmt='%m/%d/%Y %H:%M:%S',
                         level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
     logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s" %

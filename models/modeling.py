@@ -23,6 +23,7 @@ import models.configs as configs
 from .modeling_resnet import ResNetV2
 
 from .contrastive_loss import ContrastiveLoss
+from .xbm import XBM
 
 logger = logging.getLogger(__name__)
 
@@ -262,14 +263,15 @@ class Transformer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, config, img_size=224, num_classes=21843, zero_head=False, vis=False):
+    def __init__(self, config, img_size=224, num_classes=21843,
+                 zero_head=False, vis=False):
         super(VisionTransformer, self).__init__()
         self.num_classes = num_classes
         self.zero_head = zero_head
         self.classifier = config.classifier
 
         self.transformer = Transformer(config, img_size, vis)
-        # self.head = Linear(config.hidden_size, num_classes)
+        self.head = Linear(config.hidden_size, num_classes)
 
     def forward(self, x, labels=None):
         x, attn_weights = self.transformer(x)
@@ -278,7 +280,6 @@ class VisionTransformer(nn.Module):
         feats = F.normalize(feats, p=2, dim=1) 
         if labels is not None:
             #loss_fct = CrossEntropyLoss()
-            loss_contr = ContrastiveLoss()
             '''
             flag = True
             if flag:
@@ -290,6 +291,7 @@ class VisionTransformer(nn.Module):
                 print("labels shape: ", labels.shape)
                 flag = False
             '''
+            loss_contr = ContrastiveLoss()
             loss = loss_contr(feats, labels, feats, labels)
             return loss
         else:
