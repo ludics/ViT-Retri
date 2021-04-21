@@ -25,7 +25,7 @@ from .modeling_resnet import ResNetV2
 from .contrastive_loss import ContrastiveLoss
 from .xbm import XBM
 
-logger = logging.getLogger(__name__)
+#logger = logging.getLogger(__name__)
 
 
 ATTENTION_Q = "MultiHeadDotProductAttention_1/query"
@@ -317,7 +317,7 @@ class VisionTransformer(nn.Module):
             if posemb.size() == posemb_new.size():
                 self.transformer.embeddings.position_embeddings.copy_(posemb)
             else:
-                logger.info("load_pretrained: resized variant: %s to %s" % (posemb.size(), posemb_new.size()))
+                print("load_pretrained: resized variant: %s to %s" % (posemb.size(), posemb_new.size()))
                 ntok_new = posemb_new.size(1)
 
                 if self.classifier == "token":

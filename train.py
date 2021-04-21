@@ -30,10 +30,10 @@ from utils.feat_extractor import feat_extractor
 from evaluations.eval import AccuracyCalculator
 from evaluations.ret_metric import RetMetric
 from utils.log_info import log_info
-from utils.logger import setup_logger
+from utils.utils import initial_logger
 
-logger = logging.getLogger(__name__)
-
+# logger = logging.getLogger(__name__)
+logger = 1
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -129,7 +129,8 @@ best_iter = -1
 def valid(args, model, writer, test_loader, global_step):
     # Validation!
     global best_mapr
-    logger.info("\n")
+    global best_iter
+    print("\n")
     logger.info("***** Running Validation *****")
     logger.info(f"  Num steps = {len(test_loader)}, Batch size = {args.eval_batch_size}")
 
@@ -171,10 +172,15 @@ def train(args, model):
     train_loader, test_loader = get_loader(args)
 
     # Prepare optimizer and scheduler
-    optimizer = torch.optim.SGD(model.parameters(),
-                                lr=args.learning_rate,
-                                momentum=0.9,
-                                weight_decay=args.weight_decay)
+    if args.optim_type == "SGD":
+        optimizer = torch.optim.SGD(model.parameters(),
+                                    lr=args.learning_rate,
+                                    momentum=0.9,
+                                    weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(),
+                                    lr=args.learning_rate,
+                                    weight_decay=args.weight_decay)
     t_total = args.num_steps
     if args.decay_type == "cosine":
         scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
@@ -326,6 +332,8 @@ def main():
                         help="Total number of training epochs to perform.")
     parser.add_argument("--decay_type", choices=["cosine", "linear"], default="cosine",
                         help="How to decay the learning rate.")
+    parser.add_argument("--optim_type", choices=["SGD", "AdamW"], default="SGD",
+                        help="How to optimize parameters.")
     parser.add_argument("--warmup_steps", default=500, type=int,
                         help="Step of training to perform learning rate warmup for.")
     parser.add_argument("--max_grad_norm", default=1.0, type=float,
@@ -377,10 +385,13 @@ def main():
     log_path = os.path.join("logs", args.name)
     os.makedirs(log_path, exist_ok=True)
     log_file_name = os.path.join(log_path, time.strftime("%m-%d-%H:%M", time.localtime()) + '.log')
-    logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-                        #filename=log_file_name, filemode='w',
-                        datefmt='%m/%d/%Y %H:%M:%S',
-                        level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
+    global logger
+    logger = initial_logger(log_file_name)
+
+    #logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+    #                    #filename=log_file_name, filemode='w',
+    #                    datefmt='%m/%d/%Y %H:%M:%S',
+    #                    level=logging.INFO if args.local_rank in [-1, 0] else logging.WARN)
     logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s" %
                    (args.local_rank, args.device, args.n_gpu, bool(args.local_rank != -1), args.fp16))
 
