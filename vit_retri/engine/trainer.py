@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from apex import amp
 from apex.parallel import DistributedDataParallel as DDP
 
-from models.modeling import VisionTransformer, CONFIGS
+from vit_retri.models.modeling import VisionTransformer, CONFIGS
 from vit_retri.utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
 from vit_retri.utils.data_utils import get_loader
 from vit_retri.utils.dist_util import get_world_size

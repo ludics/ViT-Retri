@@ -18,12 +18,12 @@ from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNo
 from torch.nn.modules.utils import _pair
 from scipy import ndimage
 
-import models.configs as configs
+import vit_retri.models.configs as configs
 
-from .modeling_resnet import ResNetV2
+from vit_retri.models.modeling_resnet import ResNetV2
 
-from .contrastive_loss import ContrastiveLoss
-from .xbm import XBM
+from vit_retri.models.contrastive_loss import ContrastiveLoss
+from vit_retri.models.xbm import XBM
 
 #logger = logging.getLogger(__name__)
 

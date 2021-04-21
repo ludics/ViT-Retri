@@ -10,11 +10,11 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 
-from ret_metric.utils.utils import initial_logger
+from vit_retri.utils.utils import initial_logger
 
-from ret_metric.engine import setup
-from ret_metric.engine import set_seed
-from ret_metric.engine import train
+from vit_retri.engine import setup
+from vit_retri.engine import set_seed
+from vit_retri.engine import train
 
 def parse_args():
     parser = argparse.ArgumentParser()
