@@ -1,8 +1,6 @@
 # coding=utf-8
 from __future__ import absolute_import, division, print_function
 
-import logging
-import argparse
 import os
 import random
 import numpy as np
@@ -32,6 +30,7 @@ from vit_retri.evaluations.eval import AccuracyCalculator
 from vit_retri.evaluations.ret_metric import RetMetric
 from vit_retri.utils.log_info import log_info
 from vit_retri.utils.utils import initial_logger
+from vit_retri.utils.utils import AverageMeter
 
 
 def simple_accuracy(preds, labels):
@@ -197,9 +196,9 @@ def train(args, model, logger):
     losses = AverageMeter()
     global_step, best_acc = 0, 0
     if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-        mapr_curr = valid(args, model, writer, test_loader, global_step)
+        mapr_curr = valid(args, model, writer, test_loader, global_step, logger)
         if best_acc < mapr_curr:
-            save_model(args, model, best=True)
+            save_model(args, model, logger, best=True)
             best_acc = mapr_curr
     while True:
         model.train()
@@ -252,12 +251,12 @@ def train(args, model, logger):
                 if args.local_rank in [-1, 0]:
                     flush_log(writer, global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-                    mapr_curr = valid(args, model, writer, test_loader, global_step)
+                    mapr_curr = valid(args, model, writer, test_loader, global_step, logger)
                     if best_acc < mapr_curr:
-                        save_model(args, model, best=True)
+                        save_model(args, model, logger, best=True)
                         best_acc = mapr_curr
                     if global_step % args.save_iter == 0:
-                        save_model(args, model, step=global_step)
+                        save_model(args, model, logger, step=global_step)
                     model.train()
 
                 if global_step % t_total == 0:
