@@ -18,18 +18,20 @@ from torch.utils.tensorboard import SummaryWriter
 from apex import amp
 from apex.parallel import DistributedDataParallel as DDP
 
-from vit_retri.models.modeling import VisionTransformer, CONFIGS
+from vit_retri.models import VisionTransformer, CONFIGS, DSHNet
 from vit_retri.utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
 from vit_retri.utils.data_utils import get_loader
 from vit_retri.utils.dist_util import get_world_size
 from vit_retri.models.contrastive_loss import ContrastiveLoss
+from vit_retri.models.hash_loss import DCHLoss
 from vit_retri.models.xbm import XBM
-from vit_retri.utils.feat_extractor import feat_extractor
+from vit_retri.utils.feat_extractor import feat_extractor, code_generator
 from vit_retri.evaluations.eval import AccuracyCalculator
 from vit_retri.evaluations.ret_metric import RetMetric
 from vit_retri.utils.log_info import log_info
 from vit_retri.utils.utils import initial_logger
 from vit_retri.utils.utils import AverageMeter
+from vit_retri.utils.tools import CalcTopMap, pr_curve
 
 
 def simple_accuracy(preds, labels):
@@ -66,8 +68,7 @@ def setup(args, logger):
     else:
         num_classes = 100
 
-    model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes)
-    model.load_from(np.load(args.pretrained_dir))
+    model = DSHNet(args)
     if args.pretrained_model is not None:
         pretrained_model = torch.load(args.pretrained_model)['model']
         model.load_state_dict(pretrained_model)
@@ -115,28 +116,26 @@ def valid(args, model, writer, test_loader, global_step, logger):
 
     model.eval()
     labels = test_loader.dataset.test_label
-    labels = np.array([int(k) for k in labels])
-    feats = feat_extractor(model, test_loader, logger)
-    ret_metric = AccuracyCalculator(include=("precision_at_1", "mean_average_precision_at_r",
-                                             "r_precision"), exclude=())
-    ret_metric = ret_metric.get_accuracy(feats, feats, labels, labels, True)
-    mapr_curr = ret_metric["mean_average_precision_at_r"]
-    for k, v in ret_metric.items():
-        log_info[f"e_{k}"] = v
-    r_k = RetMetric(feats, labels)
-    r_k_dict = {}
-    for k in [1, 2, 4, 8]:
-        log_info[f"R@{k}"] = r_k.recall_k(k)
-        r_k_dict[f"R@{k}"] = log_info[f"R@{k}"]
-    if mapr_curr > best_mapr:
-        best_mapr = mapr_curr
+    labels = torch.eye(100)[torch.tensor(labels)-100]
+    codes = code_generator(model, test_loader, logger)
+    log_info["mAP"] = CalcTopMap(codes.numpy(), codes.numpy(),
+                                        labels.numpy(), labels.numpy(), 10000)
+    map_curr = log_info["mAP"]
+    pr_range = [1, 2, 4, 8]
+    P, R = pr_curve(codes.numpy(), codes.numpy(), labels.numpy(), labels.numpy(), pr_range)
+    for i, k in enumerate(pr_range):
+        log_info[f"P@{k}"] = P[i]
+        log_info[f"R@{k}"] = R[i]
+    if map_curr > best_mapr:
+        best_mapr = map_curr
         best_iter = global_step
-        logger.info(f"Best iteration {global_step}: {ret_metric}")
+        logger.info(f"Best iteration {global_step}:")
     else:
-        logger.info(f"Performance at iteration {global_step:06d}: {ret_metric}")
-    logger.info(f"R@k : {r_k_dict}")
+        logger.info(f"Performance at iteration {global_step:06d}:")
+    for k, v in log_info.items():
+        logger.info(f"{k}: {v}")
     flush_log(writer, global_step)
-    return mapr_curr
+    return map_curr
 
 
 def train(args, model, logger):
@@ -185,7 +184,7 @@ def train(args, model, logger):
                     torch.distributed.get_world_size() if args.local_rank != -1 else 1))
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     
-    criterion = ContrastiveLoss()
+    criterion = DCHLoss(args, args.hash_bit)
     if args.use_xbm:
         logger.info(">>> use XBM")
         xbm = XBM(len(train_loader.dataset), args.hidden_size)
@@ -193,6 +192,8 @@ def train(args, model, logger):
     model.zero_grad()
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
     losses = AverageMeter()
+    c_losses = AverageMeter()
+    q_losses = AverageMeter()
     global_step, best_acc = 0, 0
     if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
         mapr_curr = valid(args, model, writer, test_loader, global_step, logger)
@@ -209,17 +210,17 @@ def train(args, model, logger):
         for step, batch in enumerate(epoch_iterator):
             batch = tuple(t.to(args.device) for t in batch)
             x, y = batch
-            feats, _ = model(x)
-            feats = F.normalize(feats, p=2, dim=1) 
+            codes  = model(x)
+            labels = torch.eye(100)[y].to(args.device)
             if args.use_xbm and global_step > args.xbm_start_step:
-                xbm.enqueue_dequeue(feats.detach(), y.detach())
+                xbm.enqueue_dequeue(codes.detach(), y.detach())
 
-            loss = criterion(feats, y, feats, y)
-            log_info["batch_loss"] = loss.item()
+            c_loss, q_loss = criterion(codes, labels)
+            loss = c_loss + args.lambd * q_loss
 
             if args.use_xbm and global_step > args.xbm_start_step:
                 xbm_feats, xbm_targets = xbm.get()
-                xbm_loss = criterion(feats, y, xbm_feats, xbm_targets)
+                xbm_loss = criterion(codes, labels)
                 log_info["xbm_loss"] = xbm_loss.item()
                 loss = loss + xbm_loss
 
@@ -233,20 +234,24 @@ def train(args, model, logger):
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 losses.update(loss.item()*args.gradient_accumulation_steps)
+                c_losses.update(c_loss.item()*args.gradient_accumulation_steps)
+                q_losses.update(q_loss.item()*args.gradient_accumulation_steps)
                 if args.fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                scheduler.step()
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
 
                 epoch_iterator.set_description(
                     "Training (%d / %d Steps) (loss=%2.5f) (lr=%.6f)" % (global_step, t_total, losses.val, scheduler.get_lr()[0])
                 )
-                log_info["loss"] = loss.item()
                 log_info["lr"] = scheduler.get_lr()[0]
+                log_info["loss"] = losses.val
+                log_info["c_loss"] = c_losses.val
+                log_info["q_loss"] = q_losses.val
                 if args.local_rank in [-1, 0]:
                     flush_log(writer, global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
@@ -261,6 +266,8 @@ def train(args, model, logger):
                 if global_step % t_total == 0:
                     break
         losses.reset()
+        c_losses.reset()
+        q_losses.reset()
         if global_step % t_total == 0:
             break
 

@@ -277,7 +277,6 @@ class VisionTransformer(nn.Module):
         x, attn_weights = self.transformer(x)
         # logits = self.head(x[:, 0])
         feats = x[:, 0]
-        feats = F.normalize(feats, p=2, dim=1) 
         if labels is not None:
             #loss_fct = CrossEntropyLoss()
             '''
@@ -291,6 +290,7 @@ class VisionTransformer(nn.Module):
                 print("labels shape: ", labels.shape)
                 flag = False
             '''
+            feats = F.normalize(feats, p=2, dim=1) 
             loss_contr = ContrastiveLoss()
             loss = loss_contr(feats, labels, feats, labels)
             return loss

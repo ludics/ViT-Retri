@@ -7,7 +7,7 @@ import torch
 from torchvision import transforms, datasets
 from torch.utils.data import DataLoader, RandomSampler, DistributedSampler, SequentialSampler
 
-from .retri_dataset import CUB, CarsDataset, NABirds, dogs, INat2017
+from .dataset import CUB, CarsDataset, NABirds, dogs, INat2017
 from .autoaugment import AutoAugImageNetPolicy
 
 logger = logging.getLogger(__name__)
