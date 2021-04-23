@@ -241,9 +241,9 @@ def CalcHammingDist(B1, B2):
 def CalcTopMap(rB, qB, retrievalL, queryL, topk):
     num_query = queryL.shape[0]
     topkmap = 0
-    for iter in tqdm(range(num_query)):
-        gnd = (np.dot(queryL[iter, :], retrievalL.transpose()) > 0).astype(np.float32)
-        hamm = CalcHammingDist(qB[iter, :], rB)
+    for it in tqdm(range(num_query)):
+        gnd = (np.dot(queryL[it, :], retrievalL.transpose()) > 0).astype(np.float32)
+        hamm = CalcHammingDist(qB[it, :], rB)
         ind = np.argsort(hamm)
         gnd = gnd[ind]
 

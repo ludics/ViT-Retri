@@ -16,7 +16,7 @@ from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import download_url, list_dir, check_integrity, extract_archive, verify_str_arg
 
-class CUB():
+class DisjointCUB():
     def __init__(self, root, is_train=True, data_len=None, transform=None):
         self.root = root
         self.is_train = is_train

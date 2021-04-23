@@ -20,7 +20,7 @@ from apex.parallel import DistributedDataParallel as DDP
 
 from vit_retri.models import VisionTransformer, CONFIGS, DSHNet
 from vit_retri.utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
-from vit_retri.utils.data_utils import get_loader
+from vit_retri.utils.data_utils import get_loader, get_disjoint_loader
 from vit_retri.utils.dist_util import get_world_size
 from vit_retri.models.contrastive_loss import ContrastiveLoss
 from vit_retri.models.hash_loss import DCHLoss
@@ -106,7 +106,7 @@ def flush_log(writer, iteration):
 best_mapr = 0
 best_iter = -1
 
-def valid(args, model, writer, test_loader, global_step, logger):
+def valid(args, model, writer, query_loader, database_loader, global_step, logger):
     # Validation!
     global best_mapr
     global best_iter
@@ -115,17 +115,25 @@ def valid(args, model, writer, test_loader, global_step, logger):
     logger.info(f"  Num steps = {len(test_loader)}, Batch size = {args.eval_batch_size}")
 
     model.eval()
-    labels = test_loader.dataset.test_label
-    labels = torch.eye(100)[torch.tensor(labels)-100]
-    codes = code_generator(model, test_loader, logger)
-    log_info["mAP"] = CalcTopMap(codes.numpy(), codes.numpy(),
-                                        labels.numpy(), labels.numpy(), 10000)
+    query_labels = query_loader.dataset.test_label
+    query_codes = code_generator(model, query_loader, logger)
+    if args.dataset_joint:
+        database_labels = database_loader.dataset.train_label
+        query_labels = torch.eye(200)[torch.tensor(query_labels)]
+        database_labels = torch.eye(200)[torch.tensor(database_labels)]
+        database_codes = code_generator(model, database_loader, logger)
+    else:
+        database_labels = database_loader.dataset.test_label
+        query_labels = torch.eye(100)[torch.tensor(query_labels)-100]
+        database_labels = torch.eye(100)[torch.tensor(database_labels)-100]
+        database_codes = query_codes
+    log_info["mAP"] = CalcTopMap(database_codes.numpy(), query_codes.numpy(),
+                                        database_labels.numpy(), query_labels.numpy(), 10000)
     map_curr = log_info["mAP"]
-    pr_range = [1, 2, 4, 8]
-    P, R = pr_curve(codes.numpy(), codes.numpy(), labels.numpy(), labels.numpy(), pr_range)
+    r_k = RetMetric((query_codes, database_codes), (query_labels, database_labels), hamming_dist=True)
+    recall_range = [1, 2, 4, 8]
     for i, k in enumerate(pr_range):
-        log_info[f"P@{k}"] = P[i]
-        log_info[f"R@{k}"] = R[i]
+        log_info[f"R@{k}"] = r_k.recall_k(k)
     if map_curr > best_mapr:
         best_mapr = map_curr
         best_iter = global_step
@@ -147,8 +155,15 @@ def train(args, model, logger):
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
     # Prepare dataset
-    train_loader, test_loader = get_loader(args)
-
+    # TODO: update label nums
+    if args.dataset_joint:
+        train_loader, query_loader = get_loader(args)
+        database_loader = train_loader
+        one_hot_labels = torch.ones(200)
+    else:
+        train_loader, query_loader = get_disjoint_loader(args)
+        database_loader = query_loader
+        one_hot_labels = torch.ones(100)
     # Prepare optimizer and scheduler
     if args.optim_type == "SGD":
         optimizer = torch.optim.SGD(model.parameters(),
@@ -196,7 +211,7 @@ def train(args, model, logger):
     q_losses = AverageMeter()
     global_step, best_acc = 0, 0
     if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-        mapr_curr = valid(args, model, writer, test_loader, global_step, logger)
+        mapr_curr = valid(args, model, writer, query_loader, database_loader, global_step, logger)
         if best_acc < mapr_curr:
             save_model(args, model, logger, best=True)
             best_acc = mapr_curr
@@ -211,7 +226,7 @@ def train(args, model, logger):
             batch = tuple(t.to(args.device) for t in batch)
             x, y = batch
             codes  = model(x)
-            labels = torch.eye(100)[y].to(args.device)
+            labels = one_hot_labels[y].to(args.device)
             if args.use_xbm and global_step > args.xbm_start_step:
                 xbm.enqueue_dequeue(codes.detach(), y.detach())
 
@@ -255,7 +270,7 @@ def train(args, model, logger):
                 if args.local_rank in [-1, 0]:
                     flush_log(writer, global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-                    mapr_curr = valid(args, model, writer, test_loader, global_step, logger)
+                    mapr_curr = valid(args, model, writer, query_loader, database_loader, global_step, logger)
                     if best_acc < mapr_curr:
                         save_model(args, model, logger, best=True)
                         best_acc = mapr_curr
