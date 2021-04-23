@@ -115,17 +115,17 @@ def valid(args, model, writer, test_loader, global_step, logger):
     logger.info(f"  Num steps = {len(test_loader)}, Batch size = {args.eval_batch_size}")
 
     model.eval()
-    labels = test_loader.dataset.test_label
-    labels = torch.eye(100)[torch.tensor(labels)-100]
+    labels = torch.tensor(test_loader.dataset.test_label) - 100
+    labels_onehot = torch.eye(100)[labels]
     codes = code_generator(model, test_loader, logger)
     log_info["mAP"] = CalcTopMap(codes.numpy(), codes.numpy(),
-                                        labels.numpy(), labels.numpy(), 10000)
+                                        labels_onehot.numpy(), labels_onehot.numpy(), 10000)
     map_curr = log_info["mAP"]
-    pr_range = [1, 2, 4, 8]
-    P, R = pr_curve(codes.numpy(), codes.numpy(), labels.numpy(), labels.numpy(), pr_range)
+    pr_range = [10, 20, 40, 80]
+    r_k_func = RetMetric(codes.numpy(), labels.numpy(), hamming_dis=True)
+    # P, R = pr_curve(codes.numpy(), codes.numpy(), labels.numpy(), labels.numpy(), pr_range)
     for i, k in enumerate(pr_range):
-        log_info[f"P@{k}"] = P[i]
-        log_info[f"R@{k}"] = R[i]
+        log_info[f"R@{k}"] = r_k_func.recall_k(k)
     if map_curr > best_mapr:
         best_mapr = map_curr
         best_iter = global_step

@@ -2,7 +2,7 @@ import numpy as np
 
 
 class RetMetric(object):
-    def __init__(self, feats, labels):
+    def __init__(self, feats, labels, hamming_dis=False):
 
         if len(feats) == 2 and type(feats) == list:
             """
@@ -18,8 +18,10 @@ class RetMetric(object):
             self.is_equal_query = True
             self.gallery_feats = self.query_feats = feats
             self.gallery_labels = self.query_labels = labels
-
+        
         self.sim_mat = np.matmul(self.query_feats, np.transpose(self.gallery_feats))
+        if hamming_dis:
+            self.sim_mat = 0.5 * (self.gallery_feats.shape[1] - self.sim_mat)
 
     def recall_k(self, k=1):
         m = len(self.sim_mat)
