@@ -96,6 +96,9 @@ def parse_args():
     parser.add_argument('--lambd', type=float, default=0.1,
                         help="Cauchy loss lambd")
 
+    parser.add_argument('--dataset_joint', action='store_true',
+                        help="Whether train & test dataset joint")
+    
     return parser.parse_args()
 
 def main():
