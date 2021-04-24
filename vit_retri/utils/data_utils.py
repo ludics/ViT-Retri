@@ -7,10 +7,45 @@ import torch
 from torchvision import transforms, datasets
 from torch.utils.data import DataLoader, RandomSampler, DistributedSampler, SequentialSampler
 
-from .retri_dataset import CUB, CarsDataset, NABirds, dogs, INat2017
+from .dataset import CUB, CarsDataset, NABirds, dogs, INat2017
+from .retri_dataset import DisjointCUB
 from .autoaugment import AutoAugImageNetPolicy
 
 logger = logging.getLogger(__name__)
+
+
+def get_disjoint_loader(args):
+    if args.local_rank not in [-1, 0]:
+        torch.distributed.barrier()
+    if args.dataset == 'CUB_200_2011':
+        train_transform=transforms.Compose([transforms.Resize((600, 600), Image.BILINEAR),
+                                    transforms.RandomCrop((448, 448)),
+                                    transforms.RandomHorizontalFlip(),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+        test_transform=transforms.Compose([transforms.Resize((600, 600), Image.BILINEAR),
+                                    transforms.CenterCrop((448, 448)),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+        trainset = DisjointCUB(root=args.data_root, is_train=True, transform=train_transform)
+        testset = DisjointCUB(root=args.data_root, is_train=False, transform = test_transform)
+    if args.local_rank == 0:
+        torch.distributed.barrier()
+
+    train_sampler = RandomSampler(trainset) if args.local_rank == -1 else DistributedSampler(trainset)
+    test_sampler = SequentialSampler(testset)
+    train_loader = DataLoader(trainset,
+                              sampler=train_sampler,
+                              batch_size=args.train_batch_size,
+                              num_workers=4,
+                              pin_memory=True)
+    test_loader = DataLoader(testset,
+                             sampler=test_sampler,
+                             batch_size=args.eval_batch_size,
+                             num_workers=4,
+                             pin_memory=True) if testset is not None else None
+
+    return train_loader, test_loader
 
 
 def get_loader(args):
@@ -133,9 +168,15 @@ def get_loader(args):
         torch.distributed.barrier()
 
     train_sampler = RandomSampler(trainset) if args.local_rank == -1 else DistributedSampler(trainset)
+    gallery_sampler = SequentialSampler(trainset)
     test_sampler = SequentialSampler(testset)
     train_loader = DataLoader(trainset,
                               sampler=train_sampler,
+                              batch_size=args.train_batch_size,
+                              num_workers=4,
+                              pin_memory=True)
+    gallery_loader = DataLoader(trainset,
+                              sampler=gallery_sampler,
                               batch_size=args.train_batch_size,
                               num_workers=4,
                               pin_memory=True)
@@ -145,4 +186,4 @@ def get_loader(args):
                              num_workers=4,
                              pin_memory=True) if testset is not None else None
 
-    return train_loader, test_loader
+    return train_loader, test_loader, gallery_loader

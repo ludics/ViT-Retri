@@ -20,7 +20,7 @@ from apex.parallel import DistributedDataParallel as DDP
 
 from vit_retri.models import VisionTransformer, CONFIGS, DSHNet
 from vit_retri.utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
-from vit_retri.utils.data_utils import get_loader
+from vit_retri.utils.data_utils import get_loader, get_disjoint_loader
 from vit_retri.utils.dist_util import get_world_size
 from vit_retri.models.contrastive_loss import ContrastiveLoss
 from vit_retri.models.hash_loss import DCHLoss
@@ -106,7 +106,7 @@ def flush_log(writer, iteration):
 best_mapr = 0
 best_iter = -1
 
-def valid(args, model, writer, test_loader, global_step, logger):
+def valid(args, model, writer, test_loader, database_loader, global_step, logger):
     # Validation!
     global best_mapr
     global best_iter
@@ -115,14 +115,19 @@ def valid(args, model, writer, test_loader, global_step, logger):
     logger.info(f"  Num steps = {len(test_loader)}, Batch size = {args.eval_batch_size}")
 
     model.eval()
-    labels = torch.tensor(test_loader.dataset.test_label) - 100
-    labels_onehot = torch.eye(100)[labels]
-    codes = code_generator(model, test_loader, logger)
-    log_info["mAP"] = CalcTopMap(codes.numpy(), codes.numpy(),
-                                        labels_onehot.numpy(), labels_onehot.numpy(), 10000)
+    test_codes, test_labels = code_generator(model, test_loader, logger)
+    test_labels_onehot = torch.eye(200)[test_labels]
+    gallery_codes, gallery_labels = code_generator(model, database_loader, logger)
+    gallery_labels_onehot = torch.eye(200)[gallery_labels]
+    log_info["mAP"] = CalcTopMap(gallery_codes, test_codes,
+                                 gallery_labels_onehot.numpy(), test_labels_onehot.numpy(), 10000)
+    logger.info(f"test size: {test_codes.shape[0]}")
+    logger.info(f"gallery size: {gallery_codes.shape[0]}")
     map_curr = log_info["mAP"]
     pr_range = [10, 20, 40, 80]
-    r_k_func = RetMetric(codes.numpy(), labels.numpy(), hamming_dis=True)
+    codes = [gallery_codes, test_codes]
+    labels = [gallery_labels.numpy(), test_labels.numpy()]
+    r_k_func = RetMetric(codes, labels, hamming_dis=True)
     # P, R = pr_curve(codes.numpy(), codes.numpy(), labels.numpy(), labels.numpy(), pr_range)
     for i, k in enumerate(pr_range):
         log_info[f"R@{k}"] = r_k_func.recall_k(k)
@@ -147,8 +152,12 @@ def train(args, model, logger):
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
 
     # Prepare dataset
-    train_loader, test_loader = get_loader(args)
-
+    if args.dataset_joint:
+        train_loader, test_loader, database_loader = get_loader(args)
+        # database_loader = train_loader
+    else:
+        train_loader, test_loader = get_disjoint_loader(args)
+        database_loader = test_loader
     # Prepare optimizer and scheduler
     if args.optim_type == "SGD":
         optimizer = torch.optim.SGD(model.parameters(),
@@ -196,7 +205,7 @@ def train(args, model, logger):
     q_losses = AverageMeter()
     global_step, best_acc = 0, 0
     if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-        mapr_curr = valid(args, model, writer, test_loader, global_step, logger)
+        mapr_curr = valid(args, model, writer, test_loader, database_loader, global_step, logger)
         if best_acc < mapr_curr:
             save_model(args, model, logger, best=True)
             best_acc = mapr_curr
@@ -211,7 +220,7 @@ def train(args, model, logger):
             batch = tuple(t.to(args.device) for t in batch)
             x, y = batch
             codes  = model(x)
-            labels = torch.eye(100)[y].to(args.device)
+            labels = torch.eye(200)[y].to(args.device)
             if args.use_xbm and global_step > args.xbm_start_step:
                 xbm.enqueue_dequeue(codes.detach(), y.detach())
 
@@ -255,7 +264,7 @@ def train(args, model, logger):
                 if args.local_rank in [-1, 0]:
                     flush_log(writer, global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-                    mapr_curr = valid(args, model, writer, test_loader, global_step, logger)
+                    mapr_curr = valid(args, model, writer, test_loader, database_loader, global_step, logger)
                     if best_acc < mapr_curr:
                         save_model(args, model, logger, best=True)
                         best_acc = mapr_curr

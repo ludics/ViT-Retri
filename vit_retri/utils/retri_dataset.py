@@ -16,7 +16,7 @@ from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
 from torchvision.datasets.utils import download_url, list_dir, check_integrity, extract_archive, verify_str_arg
 
-class CUB():
+class DisjointCUB():
     def __init__(self, root, is_train=True, data_len=None, transform=None):
         self.root = root
         self.is_train = is_train
@@ -36,24 +36,24 @@ class CUB():
         if self.is_train:
             self.train_img = [scipy.misc.imread(os.path.join(self.root, img_name)) for img_name in
                               train_name_list[:data_len]]
-            self.train_label = train_label_list[:data_len]
+            self.label = train_label_list[:data_len]
             self.train_imgname = train_name_list[:data_len]
         if not self.is_train:
             self.test_img = [scipy.misc.imread(os.path.join(self.root, img_name)) for img_name in
                               test_name_list[:data_len]]
-            self.test_label = test_label_list[:data_len]
+            self.label = test_label_list[:data_len]
             self.test_imgname = test_name_list[:data_len]
     
     def __getitem__(self, index):
         if self.is_train:
-            img, target, imgname = self.train_img[index], self.train_label[index], self.train_imgname[index]
+            img, target, imgname = self.train_img[index], self.label[index], self.train_imgname[index]
             if len(img.shape) == 2:
                 img = np.stack([img] * 3, 2)
             img = Image.fromarray(img, mode='RGB')
             if self.transform is not None:
                 img = self.transform(img)
         else:
-            img, target, imgname = self.test_img[index], self.test_label[index], self.test_imgname[index]
+            img, target, imgname = self.test_img[index], self.label[index], self.test_imgname[index]
             if len(img.shape) == 2:
                 img = np.stack([img] * 3, 2)
             img = Image.fromarray(img, mode='RGB')
@@ -63,10 +63,7 @@ class CUB():
         return img, target
 
     def __len__(self):
-        if self.is_train:
-            return len(self.train_label)
-        else:
-            return len(self.test_label)
+        return len(self.label)
 
 class CarsDataset(Dataset):
 

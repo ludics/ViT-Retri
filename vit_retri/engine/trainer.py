@@ -114,7 +114,7 @@ def valid(args, model, writer, test_loader, global_step, logger):
     logger.info(f"  Num steps = {len(test_loader)}, Batch size = {args.eval_batch_size}")
 
     model.eval()
-    labels = test_loader.dataset.test_label
+    labels = test_loader.dataset.label
     labels = np.array([int(k) for k in labels])
     feats = feat_extractor(model, test_loader, logger)
     ret_metric = AccuracyCalculator(include=("precision_at_1", "mean_average_precision_at_r",
